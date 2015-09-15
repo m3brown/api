@@ -24,17 +24,19 @@ CODE_COLUMN=1
 NAME_COLUMN=2
 INPUT_TYPE=csv
 PREPEND_YEAR=
+ADD_ORIGINAL_TEXT=
 
-OPTIONS_GUIDE="Usage: convert-msalsx-to-html.sh [-c code-column] [-n name-column] [-a csv-append-file] [-t input-type] [-y year] input-file
+OPTIONS_GUIDE="Usage: convert-msalsx-to-html.sh [-c code-column] [-n name-column] [-a csv-append-file | -k ] [-t input-type] [-y year] input-file
     -c	Default: $CODE_COLUMN
     -n	Default: $NAME_COLUMN
     -a	Append results to provided filename
     -t  Options: csv, xlsx	Default: $INPUT_TYPE
     -y  Prepend year as first column of csv
+    -k  Keep the unmodified text as an additional column, does not work with -a option
 "
 
 # Pull out the command line arguments (if any)
-while getopts ":c:n:a:t:y:h" opt; do
+while getopts ":c:n:a:t:y:kh" opt; do
     case $opt in
         c)
             CODE_COLUMN=$OPTARG
@@ -60,6 +62,9 @@ while getopts ":c:n:a:t:y:h" opt; do
         y)
             PREPEND_YEAR=$OPTARG
             ;;
+        k)
+            ADD_ORIGINAL_TEXT=1
+            ;;
         h)
             echo "$OPTIONS_GUIDE" >&2
             exit 0
@@ -80,12 +85,18 @@ if [ $# -ne 1 ]; then
      exit 1
 fi
 
+INPUT_FILE=$1
+
 if [[ -n "$CSV_APPEND_FILE" && -z "$PREPEND_YEAR" ]] ; then
     echo "If appending to an existing CSV file, please define the year"
     exit 1
 fi
 
-echo $INPUT_TYPE
+if [[ -n "$CSV_APPEND_FILE" && -n "$ADD_ORIGINAL_TEXT" ]] ; then
+    echo "If appending to an existing CSV file, including the unmodified text as an additional column is not supported"
+    exit 1
+fi
+
 if [ $INPUT_TYPE = 'xlsx' ]; then
     # Use xlsx2csv to convert the xlsx file: https://github.com/dilshod/xlsx2csv
     # If xlsx2csv is not installed, exit
@@ -100,7 +111,7 @@ fi
 # NOTE - if using OSX, you'll need to install a newer version of sed to support these queries.
 # `brew install gnu-sed` will create the gsed executable
 sed_bin='sed'
-command -v gsed 2> /dev/null && {
+command -v gsed 2>&1 > /dev/null && {
   sed_bin='gsed'
 }
 
@@ -153,12 +164,12 @@ sed_tweaks='
 
 if [ $INPUT_TYPE = 'xlsx' ]; then
     # xlsx2csv gracefully handles unicode nastiness, thankfully.
-    dump_cmd="xlsx2csv -d '|' \"$1\""
+    dump_cmd="xlsx2csv -d '|' \"$INPUT_FILE\""
 else
     # To make the output match xlsx2csv...
     # replace only the first comma with a |
     # remove any quotes and end-of-line commas
-    dump_cmd="cat \"$1\" | $sed_bin 's/,/|/' | $sed_bin 's/,$//' | tr -d '\"'"
+    dump_cmd="cat \"$INPUT_FILE\" | $sed_bin 's/,/|/' | $sed_bin 's/,$//' | tr -d '\"'"
 fi
 
 OUTPUT_REDIRECT="cat"
@@ -176,18 +187,25 @@ if [ -n "$CSV_APPEND_FILE" ]; then
     fi
 fi
 
-# main procedure:
+# Main procedure:
 # 1 - Dump the input file as a pipe (|) delimited CSV.  Since there are commas
 #     in some msa names, this makes it easier for us to have selectable columns
 #     for code and name.
 # 2 - Output a two column normal CSV (code and name) where name is quoted
 # 3 - Optionally add the year as a third column before the other two
-# 4 - Output to stdout or optionally append to the specified file
+# 4 - Optionally add the unmodified MSA text as an additional column on the right
+#     - This involves some trickery where the `paste` command accepts two feeds
+#       via stdin. The first is the main piped stream, and the second is a
+#       re-ingested INPUT_FILE that prints only the NAME_COLUMN
+# 5 - Output to stdout or optionally append to the specified file
 eval \
     $dump_cmd | \
     awk -F '|' '{print $'$CODE_COLUMN'",\""$'$NAME_COLUMN'"\""}' | \
     $sed_bin "$sed_tweaks" | \
     awk '{if ("'$PREPEND_YEAR'") printf "'$PREPEND_YEAR',"; print $0}' | \
+    if [[ -z "$ADD_ORIGINAL_TEXT" ]]; then cat; else
+        paste -d, - <(eval $dump_cmd | sed '/[0-9]\{5\}[,|]/!d' | awk -F '|' '{print "\""$'$NAME_COLUMN'"\""}')
+    fi | \
     eval $OUTPUT_REDIRECT
 
 
